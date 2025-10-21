@@ -1,7 +1,7 @@
 import React from 'react';
 import { CheckCircle, Clock, Circle } from 'lucide-react';
 
-const ProcessingSteps = ({ steps, currentStep, isProcessing }) => {
+const ProcessingSteps = ({ steps, currentStep, isProcessing, showProgressBar = true }) => {
   const getStepStatus = (stepId) => {
     if (stepId < currentStep) return 'completed';
     if (stepId === currentStep) return isProcessing ? 'processing' : 'current';
@@ -38,6 +38,10 @@ const ProcessingSteps = ({ steps, currentStep, isProcessing }) => {
         return 'text-gray-400 border-gray-300 bg-gray-50';
     }
   };
+
+  if (!showProgressBar) {
+    return null;
+  }
 
   return (
     <div className="bg-white rounded-xl shadow-lg p-6 animate-fade-in">

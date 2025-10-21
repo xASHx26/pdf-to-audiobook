@@ -8,6 +8,127 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import json
 from gtts import gTTS
+from datetime import datetime, timedelta
+import sqlite3
+
+# Token tracking database
+TOKEN_DB = "token_usage.db"
+
+def init_token_db():
+    """Initialize token tracking database"""
+    conn = sqlite3.connect(TOKEN_DB)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_tokens(input_tokens=0, output_tokens=0):
+    """Add token usage to database"""
+    try:
+        conn = sqlite3.connect(TOKEN_DB)
+        cursor = conn.cursor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        total = input_tokens + output_tokens
+        
+        # Check if entry exists for today
+        cursor.execute("SELECT id, input_tokens, output_tokens FROM token_usage WHERE date = ?", (today,))
+        result = cursor.fetchone()
+        
+        if result:
+            row_id, existing_input, existing_output = result
+            cursor.execute("""
+                UPDATE token_usage 
+                SET input_tokens = ?, output_tokens = ?, total_tokens = ?
+                WHERE date = ?
+            """, (
+                existing_input + input_tokens,
+                existing_output + output_tokens,
+                existing_input + existing_output + total,
+                today
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO token_usage (date, input_tokens, output_tokens, total_tokens)
+                VALUES (?, ?, ?, ?)
+            """, (today, input_tokens, output_tokens, total))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Error adding tokens: {e}")
+
+def get_token_usage(days=7):
+    """Get token usage for the last N days"""
+    try:
+        conn = sqlite3.connect(TOKEN_DB)
+        cursor = conn.cursor()
+        
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor.execute("""
+            SELECT date, input_tokens, output_tokens, total_tokens
+            FROM token_usage
+            WHERE date >= ?
+            ORDER BY date DESC
+        """, (start_date,))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                "date": row[0],
+                "input_tokens": row[1],
+                "output_tokens": row[2],
+                "total_tokens": row[3]
+            }
+            for row in results
+        ]
+    except Exception as e:
+        print(f"⚠️ Error getting token usage: {e}")
+        return []
+
+def get_today_tokens():
+    """Get today's token usage"""
+    try:
+        conn = sqlite3.connect(TOKEN_DB)
+        cursor = conn.cursor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        cursor.execute("""
+            SELECT input_tokens, output_tokens, total_tokens
+            FROM token_usage
+            WHERE date = ?
+        """, (today,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                "date": today,
+                "input_tokens": result[0],
+                "output_tokens": result[1],
+                "total_tokens": result[2]
+            }
+        else:
+            return {
+                "date": today,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            }
+    except Exception as e:
+        print(f"⚠️ Error getting today's tokens: {e}")
+        return None
 
 def get_api_key():
     """Read API key from .GITIGNORE file or environment variable"""
@@ -19,9 +140,12 @@ def get_api_key():
     # Then try .GITIGNORE file
     try:
         with open('.GITIGNORE', 'r') as file:
-            content = file.read().strip()
-            if 'api_key=' in content:
-                return content.split('api_key=')[1].strip().strip('"')
+            for line in file:
+                line = line.strip()
+                if line.startswith('api_key='):
+                    # Extract key from api_key="KEY" format
+                    key = line.split('api_key=')[1].strip().strip('"').strip("'")
+                    return key
         return None
     except FileNotFoundError:
         print("⚠️ .GITIGNORE file not found")
@@ -35,6 +159,9 @@ api_key = get_api_key()
 if not api_key:
     raise ValueError("❌ API key not found in .GITIGNORE file")
 
+# Initialize token tracking database
+init_token_db()
+
 client = genai.Client(api_key=api_key)
 app = FastAPI(
     title="PDF to Audio Converter API",
@@ -45,11 +172,39 @@ app = FastAPI(
 # Add CORS middleware for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def root():
+    return {"message": "PDF to Audio Converter API is running!", "status": "active"}
+
+@app.get("/token_usage/")
+async def get_token_usage_endpoint(days: int = 7):
+    """Get token usage statistics"""
+    try:
+        usage_history = get_token_usage(days)
+        today_usage = get_today_tokens()
+        
+        total_tokens_all_time = sum(item["total_tokens"] for item in usage_history)
+        
+        return JSONResponse(
+            content={
+                "today": today_usage,
+                "history": usage_history,
+                "total_all_time": total_tokens_all_time,
+                "daily_limit": 1000000,  # Adjust based on your plan
+                "limit_remaining": max(0, 1000000 - total_tokens_all_time)
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"❌ Error fetching token usage: {str(e)}"}
+        )
 
 @app.post("/uploadfile/")
 async def pdf_upload(file: UploadFile):
@@ -152,6 +307,13 @@ async def analyze_pdf(is_research_paper: bool = None):
                 prompt
             ]
         )
+
+        # Track token usage
+        if hasattr(response, 'usage_metadata'):
+            add_tokens(
+                input_tokens=response.usage_metadata.input_tokens,
+                output_tokens=response.usage_metadata.output_tokens
+            )
 
         ai_response = response.text.strip().upper()
         is_research_paper = "YES" in ai_response
@@ -282,6 +444,13 @@ async def summarize_pdf():
                 prompt
             ]
         )
+
+        # Track token usage
+        if hasattr(response, 'usage_metadata'):
+            add_tokens(
+                input_tokens=response.usage_metadata.input_tokens,
+                output_tokens=response.usage_metadata.output_tokens
+            )
 
         return JSONResponse(
             content={
