@@ -137,7 +137,7 @@ pdf-to-audiobook/
 - **Google Text-to-Speech**: High-quality speech synthesis
 - **Uvicorn**: ASGI server for production
 
-### Frontend
+### Frontend 
 - **React 18**: Modern UI framework
 - **Tailwind CSS**: Utility-first styling
 - **Lucide React**: Beautiful icons
